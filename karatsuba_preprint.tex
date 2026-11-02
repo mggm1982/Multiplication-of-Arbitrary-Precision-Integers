@@ -1,0 +1,260 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{mathptmx}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{url}
+\usepackage{courier}
+\emergencystretch=2em
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parskip}{4pt}
+\newtheorem{lemma}{Lemma}
+
+\title{\textbf{Tuning Karatsuba Multiplication of Arbitrary-Precision Integers:\\ An Empirical Study of Cutoff Selection and Unbalanced Operands in C++}}
+\author{Monika\\[2pt]
+\small B.Tech, Data Science and Artificial Intelligence (Batch of 2029)\\
+\small Indian Institute of Technology Roorkee, Roorkee, Uttarakhand, India}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent Multiplying two integers with thousands of digits is a basic step in cryptography, computer algebra and exact scientific computation, yet the classroom (``school'') method needs $\Theta(n^2)$ digit operations. Karatsuba's divide-and-conquer algorithm lowers this to $\Theta(n^{\log_2 3})\approx\Theta(n^{1.585})$, but a naive recursive implementation is often slower than the school method because of its overhead. We implement both algorithms from scratch in C++ using a decimal digit-vector representation and study two practical engineering questions: (i) at what operand length should the recursion stop and hand over to the school method (the \emph{cutoff}), and (ii) how should the algorithm behave when the two operands have very different lengths? The cutoff is chosen on a training set of random operands and the methods are compared on a separate testing set of 100 to 20{,}000 digits. A cutoff of 96 digits was best; around it, cutoffs of 64--128 were within about 2\% of the minimum. With this cutoff Karatsuba is $5.7\times$ faster than the school method at 20{,}000 digits, whereas a cutoff of 4 is $3.5\times$ \emph{slower}. Measured growth exponents are $2.00$ (school) and $1.58$ (Karatsuba), matching theory. For a 20{,}000-digit operand multiplied by a short one, splitting the long operand into chunks of the short operand's length reduces the time by up to $3.4\times$ over plain recursion, and the result is correct against the school method in 17 of 17 self-tests. The study is deliberately small-scale and single-machine; its limitations are discussed.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Karatsuba algorithm; big-integer multiplication; divide and conquer; cutoff tuning; unbalanced multiplication; algorithm engineering.
+
+%-------------------------------------------------------------------
+\section{Introduction: problem, objectives and motivation}
+\label{sec:intro}
+
+\textbf{The problem.} Built-in integer types in C++ hold at most 64 bits, about 19 decimal digits. Many real tasks need exact arithmetic on numbers that are thousands or millions of digits long: RSA and other public-key systems work with integers of 2048 bits or more, computer algebra systems multiply large polynomial coefficients, and record computations of $\pi$ or of large primes are dominated by multiplication of huge numbers. For such numbers we must store digits in an array and write multiplication ourselves.
+
+The method taught in school multiplies every digit of one number with every digit of the other. For two $n$-digit numbers this needs $n^2$ single-digit products, so doubling the length makes the work four times larger. For numbers with tens of thousands of digits this becomes the bottleneck of the whole computation, which is why a faster multiplication method is needed.
+
+\textbf{Objectives.} This work has four objectives:
+\begin{enumerate}[nosep]
+  \item implement school and Karatsuba multiplication of arbitrary-length (including negative) integers from first principles, with a clear correctness test suite;
+  \item find, with data, the operand length below which recursion should stop (the cutoff), using training data kept separate from testing data;
+  \item verify empirically that the running times grow as $n^{2}$ and $n^{\log_2 3}$ respectively;
+  \item handle operands of very different lengths efficiently and measure the benefit.
+\end{enumerate}
+
+\textbf{Why this is worth studying.} Asymptotically faster does not mean faster in practice. A recursive algorithm creates many small vectors, copies data and performs extra additions, and each of these costs time. A student implementing Karatsuba from a textbook typically finds that it loses to the school method on all but very large inputs unless the recursion is stopped early. How early is an \emph{empirical} question that depends on the implementation, so it must be measured. The same holds for unbalanced operands, which are common in practice (for example, multiplying a huge number by a small constant) but are not covered by the basic textbook algorithm.
+
+%-------------------------------------------------------------------
+\section{Theory}
+\label{sec:theory}
+
+\subsection{Representation and the school method}
+A non-negative integer is stored as a vector of decimal digits with the least significant digit first, so $1234$ is stored as $(4,3,2,1)$. The school method computes, for each digit $a_i$ of $a$, the partial product $a_i\cdot b$ with carries and adds it into the result at position $i$. For operands of lengths $n_a$ and $n_b$ it performs $n_a n_b$ digit multiplications, so $T_{\text{school}}(n)=\Theta(n^2)$.
+
+\subsection{Karatsuba's identity}
+Let $a$ and $b$ have at most $n$ digits and let $m=\lfloor n/2\rfloor$. Write
+\[
+a = a_1\,10^{m}+a_0,\qquad b = b_1\,10^{m}+b_0,
+\]
+where $0\le a_0,b_0<10^m$. Then
+\[
+ab = a_1b_1\,10^{2m} + (a_1b_0+a_0b_1)\,10^{m} + a_0b_0 .
+\]
+The direct approach needs four half-size products. Karatsuba observed that, with
+\[
+z_0=a_0b_0,\qquad z_2=a_1b_1,\qquad z_1=(a_0+a_1)(b_0+b_1)-z_0-z_2,
+\]
+one has $z_1=a_1b_0+a_0b_1$, because
+\[
+(a_0+a_1)(b_0+b_1)=a_0b_0+a_0b_1+a_1b_0+a_1b_1 .
+\]
+Hence
+\begin{equation}
+ab = z_2\,10^{2m} + z_1\,10^{m} + z_0 ,
+\label{eq:kara}
+\end{equation}
+and only \emph{three} half-size multiplications are needed; the extra work consists of additions, subtractions and shifts, all $O(n)$.
+
+\subsection{Complexity}
+The running time satisfies $T(n)=3\,T(n/2)+cn$. By the master theorem (or by unrolling the recursion to depth $\log_2 n$, giving $3^{\log_2 n}=n^{\log_2 3}$ leaves),
+\[
+T(n)=\Theta\!\left(n^{\log_2 3}\right)\approx\Theta\!\left(n^{1.585}\right).
+\]
+If a quantity grows as $t\propto n^k$, then $k$ can be estimated from two measurements as $k=\ln(t_2/t_1)/\ln(n_2/n_1)$; this is how the exponents in Section~\ref{sec:results} are computed.
+
+\subsection{Why a cutoff is needed}
+The $\Theta$-notation hides constants. The school method has a very small constant per digit pair, while each Karatsuba level pays for vector allocation, copying, and about $n$ extra additions and subtractions. If $T_K(n)\approx c_K n^{1.585}$ and $T_S(n)\approx c_S n^{2}$ with $c_K\gg c_S$, the two curves cross at $n^\ast=(c_K/c_S)^{1/0.415}$, and below $n^\ast$ the school method wins. The practical algorithm therefore recurses only while $n$ exceeds a \emph{cutoff} $\tau$ and calls the school method below it.
+
+\subsection{Unbalanced operands}
+If $a$ has $n$ digits and $b$ has $k\ll n$ digits, splitting both at $m=n/2$ gives $b_1=0$ and wastes the recursion. A standard remedy is to cut the long operand into $\lceil n/k\rceil$ chunks of $k$ digits, multiply each chunk by $b$ (now a balanced product), and add the shifted results. This costs about $(n/k)\,T(k)$.
+
+%-------------------------------------------------------------------
+\section{Previous work}
+\label{sec:related}
+
+Karatsuba's algorithm was found in 1960 and published by Karatsuba and Ofman in 1962 \cite{karatsuba1962}, disproving the belief, associated with Kolmogorov, that $\Omega(n^2)$ operations were necessary. It was the first multiplication method asymptotically faster than the school method.
+
+Toom \cite{toom1963} and Cook \cite{cook1966} generalised the idea by splitting each operand into more than two parts; the Toom--Cook family achieves $\Theta(n^{\log_{r}(2r-1)})$ for an $r$-way split. Sch\"onhage and Strassen \cite{schonhage1971} used the fast Fourier transform to reach $O(n\log n\log\log n)$. F\"urer \cite{furer2007} improved the asymptotic bound further, and Harvey and van der Hoeven \cite{harvey2021} proved that integers can be multiplied in $O(n\log n)$ time, which is conjectured to be optimal.
+
+On the practical side, general references such as Knuth \cite{knuth1997}, Cormen et al.\ \cite{clrs2009} and Brent and Zimmermann \cite{brent2010} describe Karatsuba and the need to switch to a simpler method for small operands, and the latter also discusses unbalanced multiplication. Production libraries such as GMP \cite{gmp} select among school, Karatsuba, Toom--Cook and FFT-based methods using tuned thresholds that depend on the processor. Zuras \cite{zuras1994} reported measured crossover points for such algorithms. Bernstein \cite{bernstein2008} surveys multiplication algorithms from a mathematician's viewpoint.
+
+These works establish both the theory and the fact that thresholds must be measured. What this study contributes is a small, fully reproducible, from-scratch implementation that uses a strict training/testing split for the cutoff and quantifies the cost of a badly chosen cutoff and the gain from chunking unbalanced operands, in a form accessible to a first-year student.
+
+%-------------------------------------------------------------------
+\section{Method}
+\label{sec:method}
+
+\subsection{Implementation}
+All code is written in C++ (single file, standard library only). A number is a \texttt{vector<int>} holding one decimal digit per element, least significant digit first. Negative numbers are handled by a small structure that stores the digit vector and a sign flag; the sign of a product is negative only when exactly one factor is negative, and zero is never negative. The implementation provides:
+\begin{itemize}[nosep]
+  \item \texttt{schoolbook(a,b)}: the $n_an_b$ method with carry propagation;
+  \item \texttt{karatsuba(a,b)}: recursion based on Eq.~\eqref{eq:kara}. It falls back to \texttt{schoolbook} when $\max(n_a,n_b)\le\tau$ or when either operand has one digit. The sums $a_0+a_1$ and $b_0+b_1$ are computed with an addition routine, and $z_1$ is obtained by two subtractions, which are always non-negative;
+  \item \texttt{multiplyUneven(big,small)}: if one operand has at least twice as many digits as the other and chunking is enabled, the long operand is cut into pieces of the short operand's length, each piece is multiplied by the short operand with \texttt{karatsuba}, and the products are added into the result at the proper offsets.
+\end{itemize}
+
+\subsection{Correctness testing}
+Before any timing, the program runs 17 automatic checks: a product with a known answer; multiplication by 0 and by 1; four sign cases; strings of all 9s of lengths 1, 10, 100 and 500 (maximal carrying); 100 random pairs of up to 300 digits at two different cutoffs; 100 random pairs of very different lengths with and without chunking, in both operand orders; the distributive law $a(b+c)=ab+ac$; and ``casting out nines'' on a 2000-digit by 1500-digit product. Karatsuba results are compared with the school method, which is simple enough to be trusted as the reference.
+
+\subsection{Experimental design}
+Random operands are generated with a fixed seed and written to text files, so that every run uses identical inputs.
+\begin{description}[nosep]
+  \item[Training set.] One pair of random numbers for each length $1000, 2000, 5000, 10000$ digits (seed 1).
+  \item[Cutoff search.] For each of 16 candidate cutoffs $\tau$ between 8 and 1024 digits (listed in Table~\ref{tab:tuning}), the Karatsuba times on the four training pairs are added; the $\tau$ with the smallest total is selected.
+  \item[Testing set.] A different set (seed 2) with one pair for each length of 100, 500, 1000, 2000, 5000, 10000 and 20000 digits. Here we time (a) the school method, (b) Karatsuba with $\tau=4$ (a deliberately poor choice, representing a naive implementation) and (c) Karatsuba with the selected cutoff.
+  \item[Unbalanced test.] A fixed 20{,}000-digit number is multiplied by random numbers of 10, 100, 1000, 5000 and 20000 digits, using the school method, Karatsuba without chunking and Karatsuba with chunking.
+\end{description}
+Each time is the mean of repeated multiplications, the repeat count being $1+2\times10^{7}/(n_an_b)$ so that short jobs run long enough to be measured, using the C++ \texttt{clock()} function. The result length is accumulated in a global variable to prevent the compiler from removing the work. The growth exponent $k$ is computed from the 1000-digit and 20000-digit measurements as in Section~\ref{sec:theory}. Hardware: [\emph{CPU model, compiler version and optimisation flags to be inserted by the author before submission}].
+
+%-------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+
+\subsection{Choice of cutoff}
+Table~\ref{tab:tuning} and Figure~\ref{fig:cutoff} show the total Karatsuba time on the training data for each cutoff. A very small cutoff is costly: $\tau=8$ takes 370\,ms, about five times the minimum. The best value is $\tau=96$ (73.9\,ms), and the curve is flat nearby: $\tau=64$ and $\tau=128$ are only 1.5\% and 2.1\% slower. Beyond 192 the time rises steadily, reaching 128\,ms at $\tau=1024$, because more of the work is done by the quadratic method. The selected cutoff is therefore $\tau^\ast=96$ digits.
+
+\begin{table}[h]
+\centering
+\caption{Total Karatsuba time (ms) on the training data (1000, 2000, 5000, 10000 digits) for each cutoff.}
+\label{tab:tuning}
+\small
+\begin{tabular}{rrrrrrrrr}
+\toprule
+$\tau$ & 8 & 16 & 24 & 32 & 48 & 64 & 96 & 128\\
+ms & 370.1 & 192.0 & 110.6 & 128.9 & 81.2 & 75.1 & \textbf{73.9} & 75.5\\
+\midrule
+$\tau$ & 160 & 192 & 256 & 320 & 384 & 512 & 768 & 1024\\
+ms & 84.6 & 82.1 & 83.7 & 99.8 & 99.9 & 102.9 & 125.4 & 128.5\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.62\textwidth]{graph_cutoff.png}
+\caption{Total Karatsuba time on the training data against the cutoff (log scale on the horizontal axis). The minimum is at 96 digits.}
+\label{fig:cutoff}
+\end{figure}
+
+\subsection{School method versus Karatsuba}
+Table~\ref{tab:testing} and Figure~\ref{fig:runtime} give the results on the testing data. At 100 digits the two methods are equal (Karatsuba with $\tau^\ast$ is $5\%$ slower, which is within what we would expect from timing noise and the call overhead). From 500 digits Karatsuba with the selected cutoff is faster, and the advantage grows with length: $1.6\times$ at 1000 digits, $3.5\times$ at 5000 digits and $5.7\times$ at 20{,}000 digits. In contrast, Karatsuba with $\tau=4$ is slower than the school method at \emph{every} tested length, by a factor of $3.5$ at 20{,}000 digits, although its slope is also lower than that of the school method.
+
+\begin{table}[h]
+\centering
+\caption{Time (ms) for one multiplication of two $n$-digit numbers (testing data). Speed-up is school time divided by Karatsuba time with $\tau^\ast=96$.}
+\label{tab:testing}
+\small
+\begin{tabular}{rrrrr}
+\toprule
+$n$ & School & Karatsuba, $\tau=4$ & Karatsuba, $\tau=96$ & Speed-up\\
+\midrule
+100 & 0.089 & 2.11 & 0.094 & 0.95$\times$\\
+500 & 2.19 & 29.0 & 1.65 & 1.32$\times$\\
+1000 & 8.90 & 87.2 & 5.57 & 1.60$\times$\\
+2000 & 33.0 & 271.8 & 16.3 & 2.02$\times$\\
+5000 & 225 & 1357 & 64.0 & 3.52$\times$\\
+10000 & 885 & 4234 & 230 & 3.85$\times$\\
+20000 & 3563 & 12348 & 630 & 5.66$\times$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.68\textwidth]{graph_runtime.png}
+\caption{Running time on the testing data (log--log axes). Straight lines indicate power-law growth; the school method is steepest.}
+\label{fig:runtime}
+\end{figure}
+
+\textbf{Growth rates.} From 1000 to 20{,}000 digits the school method's time grows by a factor of 400, giving $k=2.00$. Karatsuba with $\tau^\ast$ grows by a factor of 113, giving $k=1.58$, in agreement with $\log_2 3=1.585$. Karatsuba with $\tau=4$ gives $k=1.65$, slightly above the theoretical value, consistent with its larger recursion overhead.
+
+\subsection{Unbalanced operands}
+Table~\ref{tab:uneven} and Figure~\ref{fig:uneven} show a 20{,}000-digit number multiplied by shorter numbers. When the short number has 10 digits, plain Karatsuba is $10\times$ slower than the school method, and chunking cuts its time from 22.3\,ms to 6.5\,ms ($3.4\times$) but the school method (2.2\,ms) is still best. At 100 digits chunking again helps ($38.0\to18.9$\,ms) and is about equal to the school method (17.3\,ms). From 1000 digits upward the Karatsuba variants win: at 1000 digits chunking gives 108\,ms against 175\,ms for the school method and 119\,ms without chunking; at 5000 digits the figures are 259, 862 and 282\,ms. In the last row both operands have 20{,}000 digits, so the length ratio never reaches 2 and chunking is never triggered; the two columns (615 and 638\,ms) run the same algorithm, and their $3.7\%$ difference gives a direct estimate of the measurement noise.
+
+\begin{table}[h]
+\centering
+\caption{Time (ms) to multiply a 20{,}000-digit number by a number with the given number of digits.}
+\label{tab:uneven}
+\small
+\begin{tabular}{rrrr}
+\toprule
+Short operand (digits) & School & Karatsuba, no chunking & Karatsuba, chunking\\
+\midrule
+10 & 2.16 & 22.3 & 6.54\\
+100 & 17.3 & 38.0 & 18.9\\
+1000 & 174.5 & 118.5 & 108.0\\
+5000 & 862 & 282 & 259\\
+20000 & 3476 & 615 & 638\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.68\textwidth]{graph_uneven.png}
+\caption{Multiplying a 20{,}000-digit number by a shorter number (log--log axes).}
+\label{fig:uneven}
+\end{figure}
+
+%-------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+The objectives were met. A from-scratch C++ implementation of Karatsuba multiplication passed all 17 correctness checks against the school method. Using a training set separate from the testing set, a cutoff of 96 digits was selected, with a broad, forgiving optimum between roughly 64 and 128 digits. With this cutoff, Karatsuba overtakes the school method at a few hundred digits and is $5.7\times$ faster at 20{,}000 digits; the measured exponents, $2.00$ and $1.58$, agree with the predicted $2$ and $\log_23\approx1.585$. The same recursion with a cutoff of 4 is slower than the school method over the whole tested range, showing that the cutoff matters as much as the algorithm itself. For unbalanced operands, chunking the long number removes most of the penalty of plain recursion (up to $3.4\times$ faster) and gives the best or near-best time from about 100 digits of the shorter operand upward.
+
+\section{Limitations}
+\label{sec:limits}
+
+\begin{itemize}
+  \item \textbf{Single machine, single run.} All timings come from one computer and one session. The measured 3.7\% difference between two identical computations (Table~\ref{tab:uneven}, last row) shows that differences of a few percent, such as between cutoffs 64, 96 and 128, are not reliable. The optimum cutoff will differ on other processors and compilers, and hardware and build details must be recorded for reproducibility.
+  \item \textbf{Small data.} Each length uses one random pair, and the training set has only four pairs. No confidence intervals were computed. The chosen cutoff was not validated on lengths beyond 20{,}000 digits.
+  \item \textbf{Inefficient representation.} One decimal digit is stored in a 32-bit integer, and vectors are passed and returned by value, causing many copies. Production libraries use 32- or 64-bit limbs and in-place buffers, so absolute times here are far larger than those of GMP, and the true crossover point for an optimised implementation would be different (larger in digits but smaller in time).
+  \item \textbf{Algorithms not covered.} Toom--Cook and FFT-based multiplication, which beat Karatsuba for very long operands, and squaring (which can be cheaper than general multiplication), were not implemented.
+  \item \textbf{Timing method.} \texttt{clock()} measures processor time with limited resolution, and cache effects, memory allocation and the operating system were not controlled.
+  \item \textbf{Unbalanced case.} Chunking was only tested with one long operand length (20{,}000 digits), and the rule ``chunk if the ratio is at least 2'' was not tuned.
+  \item \textbf{Scope of claims.} The results show how one particular simple implementation behaves; they should not be read as a general ranking of algorithms.
+\end{itemize}
+
+\section*{Code and data availability}
+The source file (\texttt{karatsuba.cpp}), the plotting script, the generated training and testing number files and the CSV result files were all produced by the program described above and are available from the author on request.
+
+\begin{thebibliography}{99}\small
+\bibitem{karatsuba1962} A.~Karatsuba and Yu.~Ofman, ``Multiplication of multidigit numbers on automata,'' \emph{Doklady Akademii Nauk SSSR}, vol.~145, pp.~293--294, 1962.
+\bibitem{toom1963} A.~L.~Toom, ``The complexity of a scheme of functional elements realizing the multiplication of integers,'' \emph{Doklady Akademii Nauk SSSR}, vol.~150, pp.~496--498, 1963.
+\bibitem{cook1966} S.~A.~Cook, \emph{On the Minimum Computation Time of Functions}, Ph.D.\ thesis, Harvard University, 1966.
+\bibitem{schonhage1971} A.~Sch\"onhage and V.~Strassen, ``Schnelle Multiplikation gro\ss er Zahlen,'' \emph{Computing}, vol.~7, pp.~281--292, 1971.
+\bibitem{furer2007} M.~F\"urer, ``Faster integer multiplication,'' in \emph{Proc.\ 39th ACM Symposium on Theory of Computing (STOC)}, pp.~57--66, 2007.
+\bibitem{harvey2021} D.~Harvey and J.~van der Hoeven, ``Integer multiplication in time $O(n\log n)$,'' \emph{Annals of Mathematics}, vol.~193, no.~2, pp.~563--617, 2021.
+\bibitem{knuth1997} D.~E.~Knuth, \emph{The Art of Computer Programming, Vol.~2: Seminumerical Algorithms}, 3rd ed., Addison-Wesley, 1997.
+\bibitem{clrs2009} T.~H.~Cormen, C.~E.~Leiserson, R.~L.~Rivest and C.~Stein, \emph{Introduction to Algorithms}, 3rd ed., MIT Press, 2009.
+\bibitem{brent2010} R.~P.~Brent and P.~Zimmermann, \emph{Modern Computer Arithmetic}, Cambridge University Press, 2010.
+\bibitem{zuras1994} D.~Zuras, ``More on squaring and multiplying large integers,'' \emph{IEEE Transactions on Computers}, vol.~43, no.~8, pp.~899--908, 1994.
+\bibitem{bernstein2008} D.~J.~Bernstein, ``Fast multiplication and its applications,'' in \emph{Algorithmic Number Theory}, MSRI Publications, vol.~44, Cambridge University Press, pp.~325--384, 2008.
+\bibitem{gmp} The GNU Multiple Precision Arithmetic Library (GMP), \url{https://gmplib.org}.
+\end{thebibliography}
+
+\end{document}
